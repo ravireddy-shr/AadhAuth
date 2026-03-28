@@ -366,7 +366,7 @@ function AccessPortal({ initialPortal = 'passenger', initialPassengerMode = 'log
         <div className="auth-copy">
           <span className="auth-copy__eyebrow">AadhAuth</span>
           <h1>A Saas Product For Aadhar Authentication For Ticket Eligibilty</h1>
-          <p> Here we provide a A software for government road transportation cooperation where they can check passengers by scanning their face or entering other details for ticket eligibility 
+          <p> Here we provide a software for government road transportation cooperation where they can check passengers by scanning their face or entering Aadhar details for ticket eligibility 
           </p>
         </div>
 

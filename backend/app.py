@@ -19,10 +19,13 @@ APP_ENV = os.getenv('APP_ENV', 'development').strip().lower()
 IS_PRODUCTION = APP_ENV == 'production'
 MONGO_URL = os.getenv('MONGO_URL', 'mongodb://localhost:27017/')
 SECRET_KEY = os.getenv('SECRET_KEY')
+STARTUP_ISSUES = []
 if not SECRET_KEY:
     if IS_PRODUCTION:
-        raise RuntimeError('SECRET_KEY environment variable is required when APP_ENV=production')
-    SECRET_KEY = 'dev-local-secret-key'
+        STARTUP_ISSUES.append('SECRET_KEY environment variable is required when APP_ENV=production')
+        SECRET_KEY = 'invalid-missing-secret'
+    else:
+        SECRET_KEY = 'dev-local-secret-key'
 
 CORS_ORIGINS = [
     origin.strip()
@@ -34,10 +37,12 @@ CORS_ORIGINS = [
 ]
 CORS(app, resources={r"/*": {"origins": CORS_ORIGINS or []}})
 
-client = MongoClient(MONGO_URL)
-db = client['aadhaar_verification']
-users_collection = db['users']
-logs_collection = db['logs']
+client = None
+db = None
+users_collection = None
+logs_collection = None
+db_init_error = None
+default_accounts_bootstrapped = False
 app.config['SECRET_KEY'] = SECRET_KEY
 
 
@@ -104,6 +109,47 @@ def ensure_default_accounts():
     )
 
 
+def build_error_response(message, status_code=503, detail=None):
+    payload = {'error': message}
+    if detail and not IS_PRODUCTION:
+        payload['detail'] = detail
+    return jsonify(payload), status_code
+
+
+def ensure_db_ready():
+    global client, db, users_collection, logs_collection, db_init_error, default_accounts_bootstrapped
+
+    if STARTUP_ISSUES:
+        return build_error_response('Server configuration error', detail='; '.join(STARTUP_ISSUES))
+
+    if users_collection is not None and logs_collection is not None:
+        return None
+
+    try:
+        client = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
+        db = client['aadhaar_verification']
+        users_collection = db['users']
+        logs_collection = db['logs']
+
+        # Force a real connection during the request lifecycle so auth/URI issues
+        # become JSON API errors instead of Vercel import crashes.
+        client.admin.command('ping')
+
+        if ENABLE_DEFAULT_ACCOUNTS and not default_accounts_bootstrapped:
+            ensure_default_accounts()
+            default_accounts_bootstrapped = True
+
+        db_init_error = None
+        return None
+    except Exception as exc:
+        db_init_error = exc
+        client = None
+        db = None
+        users_collection = None
+        logs_collection = None
+        return build_error_response('Database connection failed', detail=str(exc))
+
+
 def generate_token(user_id):
     payload = {
         'user_id': user_id,
@@ -126,6 +172,10 @@ def get_json_body():
 
 
 def get_current_user():
+    db_error = ensure_db_ready()
+    if db_error:
+        return None, db_error
+
     auth = request.headers.get('Authorization', '')
     payload = verify_token(auth)
     if not payload:
@@ -163,11 +213,20 @@ def image_hash(image):
     return ''.join(str(int(b)) for b in bits)
 
 
-ensure_default_accounts()
+@app.route('/', methods=['GET'])
+def health_check():
+    db_error = ensure_db_ready()
+    if db_error:
+        return db_error
+    return jsonify({'status': 'ok', 'service': 'aadhaar-backend'}), 200
 
 
 @app.route('/register', methods=['POST'])
 def register():
+    db_error = ensure_db_ready()
+    if db_error:
+        return db_error
+
     data = get_json_body()
     name = data.get('name', '').strip()
     aadhaar = data.get('aadhaar', '').strip()
@@ -205,6 +264,10 @@ def register():
 
 @app.route('/login', methods=['POST'])
 def login():
+    db_error = ensure_db_ready()
+    if db_error:
+        return db_error
+
     data = get_json_body()
     aadhaar = data.get('aadhaar', '').strip()
     password = data.get('password', '').strip()
@@ -403,6 +466,10 @@ def rtc_scan():
 
 @app.route('/gov/stats', methods=['GET'])
 def gov_stats():
+    db_error = ensure_db_ready()
+    if db_error:
+        return db_error
+
     auth = request.headers.get('Authorization', '')
     payload = verify_token(auth)
     if not payload:
